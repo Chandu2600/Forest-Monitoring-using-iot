@@ -1,0 +1,290 @@
+#include <Wire.h>
+#include <LiquidCrystal.h>
+#include <SoftwareSerial.h>
+#include <TinyGPS.h>
+static const uint32_t GPSBaud = 9600;
+TinyGPS gps;
+float flat;
+float flon;
+String msg;
+LiquidCrystal lcd(13, 12, 11, 10, 9, 8);
+
+// GSM on pins 2 & 3
+SoftwareSerial gsm(2, 3);  // RX, TX
+
+#define vibrationPin 4
+#define firePin 5
+#define buzzer 6
+
+#define ADXL345 0x53
+
+int16_t AcX, AcY, AcZ;
+
+
+
+// flags to avoid SMS spam 😎
+bool fireSent = false;
+bool cutSent = false;
+bool fallSent = false;
+
+void setup() {
+  Serial.begin(9600);
+  gsm.begin(9600);
+  Wire.begin();
+
+  lcd.begin(16, 2);
+  lcd.print("Forest Monitor");
+  delay(2000);
+  lcd.clear();
+
+  pinMode(vibrationPin, INPUT);
+  pinMode(firePin, INPUT);
+  pinMode(buzzer, OUTPUT);
+
+  // ADXL345 init
+  Wire.beginTransmission(ADXL345);
+  Wire.write(0x2D);
+  Wire.write(8);
+  Wire.endTransmission();
+
+  delay(3000);
+}
+
+
+
+void loop() {
+
+  // ---- READ ADXL345 ----
+  Wire.beginTransmission(ADXL345);
+  Wire.write(0x32);
+  Wire.endTransmission(false);
+  Wire.requestFrom(ADXL345, 6, true);
+
+  AcX = Wire.read() | Wire.read() << 8;
+  AcY = Wire.read() | Wire.read() << 8;
+  AcZ = Wire.read() | Wire.read() << 8;
+
+  int vibration = digitalRead(vibrationPin);
+  int fire = digitalRead(firePin);
+
+  int fireStatus = 0;
+  int vibStatus = 0;
+  int fallStatus = 0;
+  int buzStatus = 0;
+
+  lcd.clear();
+
+  // ---- CONDITIONS ----
+  if (fire == LOW) {
+    lcd.print("FIRE ALERT!");
+    fireStatus = 1;
+    buzStatus = 1;
+
+    if (!fireSent) {
+      msg = "fire detected";
+      SendMessage();
+      delay(2000);
+      fireSent = true;
+    }
+
+    cutSent = false;
+    fallSent = false;
+  } else if (vibration == HIGH) {
+    lcd.print("TREE CUTTING!");
+    vibStatus = 1;
+    buzStatus = 1;
+
+    if (!cutSent) {
+      msg = "tree cutting alert";
+      SendMessage();
+      delay(2000);
+      cutSent = true;
+    }
+
+    fireSent = false;
+    fallSent = false;
+  } else if (abs(AcX) > 150 || abs(AcY) > 150) {
+    lcd.print("TREE FALL!");
+    fallStatus = 1;
+    buzStatus = 1;
+
+    if (!fallSent) {
+      msg = "tree fall detected";
+      SendMessage();
+      delay(2000);
+      fallSent = true;
+    }
+
+    fireSent = false;
+    cutSent = false;
+  } else {
+    lcd.print("All Safe :)");
+
+    // reset all flags
+    fireSent = false;
+    cutSent = false;
+    fallSent = false;
+  }
+
+  digitalWrite(buzzer, buzStatus);
+
+  // ---- SERIAL OUTPUT (for NodeMCU) ----
+  Serial.print("a");
+  Serial.print(fireStatus);
+  Serial.print("b");
+  Serial.print(vibStatus);
+  Serial.print("c");
+  Serial.print(fallStatus);
+  Serial.println("d");
+
+  delay(1000);
+  bool newData = false;
+  unsigned long chars;
+  unsigned short sentences, failed;
+
+  // For one second we parse GPS data and report some key values
+  for (unsigned long start = millis(); millis() - start < 1000;) {
+    while (Serial.available()) {
+      char c = Serial.read();
+      // Serial.write(c); // uncomment this line if you want to see the GPS data flowing
+      if (gps.encode(c))  // Did a new valid sentence come in?
+        newData = true;
+    }
+  }
+
+  if (newData) {
+    //    float flat, flon;
+    unsigned long age;
+    gps.f_get_position(&flat, &flon, &age);
+    Serial.println("LAT=");
+    Serial.println(flat == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : flat, 6);
+    //    Serial.println(flat);
+    Serial.println(" LON=");
+    Serial.println(flon == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : flon, 6);
+    //    Serial.println(flon);
+    delay(2000);
+  }
+}
+void SendMessage() {
+  gsm.println("AT");  //test check communication with gsm module
+  delay(1000);
+  gsm.println("ATE0");  //ATE0: Switch echo off. ATE1: Switch echo on.
+  delay(1000);
+  gsm.println("AT+CMGF=1");  //set sms text mode
+  delay(1000);
+ gsm.println("AT+CMGS=\"+918008282486\"\r");  //send specfic number
+  delay(1000);
+
+
+  gsm.println(msg);
+  gsm.println("LOCATION");
+  // Convert flat and flon to 6-digit precision strings
+  String flatStr = String(flat, 6);
+  String flonStr = String(flon, 6);
+  gsm.println("This is location click to direction");
+  gsm.println("http://www.google.com/maps/place/" + flatStr + "," + flonStr);  //lin
+  delay(1000);
+  gsm.write(26);
+  delay(5000);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Message sent..");
+  gsm.println("Message sent..");
+  delay(1000);
+
+  // Clear the LCD and display latitude and longitude
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("LAT : ");
+  lcd.print(flatStr);
+  lcd.setCursor(0, 1);
+  lcd.print("LNG : ");
+  lcd.print(flonStr);
+}
+
+
+
+********************************************
+#include <ESP8266WiFi.h>
+
+String apiKey = "1B9884LLOZZ3NFBV";  // Enter your Write API key from ThingSpeak
+const char* ssid = "VOTE";         // Replace with your Wi-Fi SSID
+const char* pass = "123456789";      // Replace with your Wi-Fi password
+const char* server = "api.thingspeak.com";
+
+WiFiClient client;
+
+void setup() {
+  Serial.begin(9600);
+  delay(10);
+
+  //Serial.println("Connecting to Wi-Fi...");
+  WiFi.begin(ssid, pass);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  //Serial.println("WiFi connected");
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String data = Serial.readStringUntil('\n');
+    if (data.indexOf('a') != -1 && data.length() > 1) {
+      Serial.println(data);
+
+      int indexA = data.indexOf("a") + 1;
+      int indexB = data.indexOf("b") + 1;
+      int indexC = data.indexOf("c") + 1;
+      int indexD = data.indexOf("d") + 1;
+      int indexE = data.indexOf("e") + 1;
+      int indexF = data.indexOf("f") + 1;
+      int indexG = data.indexOf("g") + 1;
+      delay(500);
+      String valueA = data.substring(indexA, indexB - 1);
+      String valueB = data.substring(indexB, indexC - 1);
+      String valueC = data.substring(indexC, indexD - 1);
+      String valueD = data.substring(indexD, indexE - 1);
+      String valueE = data.substring(indexE, indexF - 1);
+      String valueF = data.substring(indexF, indexG - 1);
+      String valueG = data.substring(indexG);  // Assuming it goes to the end of the string
+
+      delay(500);
+
+      Serial.println("Value a: " + valueA);
+      Serial.println("Value b: " + valueB);
+      Serial.println("Value c: " + valueC);
+      Serial.println("Value d: " + valueD);
+      Serial.println("Value e: " + valueE);
+      Serial.println("Value f: " + valueF);
+      delay(1000);
+      if (client.connect(server, 80)) {
+        String postStr = apiKey;
+        postStr += "&field1=" + valueA;
+        postStr += "&field2=" + valueB;
+        postStr += "&field3=" + valueC;
+        postStr += "&field4=" + valueD;
+        postStr += "&field5=" + valueE;
+        postStr += "&field6=" + valueF;
+
+
+        client.print("POST /update HTTP/1.1\n");
+        client.print("Host: api.thingspeak.com\n");
+        client.print("Connection: close\n");
+        client.print("X-THINGSPEAKAPIKEY: " + apiKey + "\n");
+        client.print("Content-Type: application/x-www-form-urlencoded\n");
+        client.print("Content-Length: ");
+        client.print(postStr.length());
+        client.print("\n\n");
+        client.print(postStr);
+        // client.stop();
+        delay(15000);  // Minimum delay between updates for ThingSpeak
+
+        // Thingspeak requires a minimum 15-second delay between updates
+      }
+    }
+  }
+}
